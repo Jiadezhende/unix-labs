@@ -1,0 +1,12 @@
+# 编译产出
+*.o
+*.out
+ioperf
+bin/
+
+# 运行时生成的测试数据文件
+testfile
+writefile
+
+# CSV 产出
+*.csv
