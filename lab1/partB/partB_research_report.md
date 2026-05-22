@@ -49,20 +49,166 @@ sequenceDiagram
 
 ### 3.2 I/O 多路复用：select、poll、epoll
 
-I/O 多路复用的本质是让一个线程同时等待多个文件描述符的“就绪事件”。应用通常把 socket 设为非阻塞，先注册或传入关注的事件，然后在事件返回后执行 `accept()`、`read()` 或 `write()`。
+I/O 多路复用的本质是让一个线程同时等待多个文件描述符的”就绪事件”。应用通常把 socket 设为非阻塞，先注册或传入关注的事件，然后在事件返回后执行 `accept()`、`read()` 或 `write()`。
 
-`select()` 使用固定大小的 fd 集合，glibc 中常见 `FD_SETSIZE` 为 1024，这限制了可直接监控的 fd 范围；每次调用还要重新设置 fd 集合。`poll()` 使用 `struct pollfd` 数组，避免了 `select()` 的位图大小问题，但内核和用户态仍需在每轮调用中处理数组，并且应用通常要线性扫描结果。因此，当监控的 fd 数量很大且活跃 fd 很少时，`select/poll` 的空转扫描成本会变高。
+#### 3.2.1 select()
 
-`epoll` 是 Linux 特有接口。它将“关注集合”保存在内核对象中，通过 `epoll_ctl()` 增删改 fd，通过 `epoll_wait()` 获取就绪事件。概念上，`epoll` 维护 interest list 和 ready list：前者表示关注哪些 fd，后者表示哪些 fd 已就绪。这样，应用无需每次把完整 fd 集合传入内核，也不必每轮扫描所有 fd。
+`select()` 使用位图（fd_set）来表示关注的 fd 集合，glibc 中常见 `FD_SETSIZE` 为 1024。每次调用前必须重置位图，内核在返回时会覆盖传入的集合，因此应用每轮都要从头扫描整个位图来找出哪些 fd 就绪。
 
-`epoll` 有两种常见触发方式：
+```mermaid
+sequenceDiagram
+    participant App as 应用线程
+    participant Kernel as 内核
+
+    loop 每一轮事件循环
+        App->>App: 重建 fd_set（最高 FD_SETSIZE=1024）
+        App->>Kernel: select(nfds, &readfds, &writefds, ...)
+        Kernel-->>Kernel: 扫描 [0, nfds) 中的每个位
+        Kernel->>App: 返回就绪数量（覆盖 fd_set）
+        App->>App: 线性扫描 fd_set，找出就绪 fd
+        App->>App: 对就绪 fd 执行 read/write
+    end
+```
+
+**关键开销**：① 用户态每轮重建位图；② 系统调用把完整位图从用户态复制到内核；③ 内核扫描所有位；④ 用户态再次线性扫描结果。监控 fd 数量越多、活跃 fd 越少，无效扫描越严重。
+
+#### 3.2.2 poll()
+
+`poll()` 将 fd 集合改为 `struct pollfd` 数组，消除了 `FD_SETSIZE` 的硬限制，接口也更清晰。每个数组元素包含 fd 编号、关注的事件（events）和返回的就绪事件（revents）。
+
+```mermaid
+sequenceDiagram
+    participant App as 应用线程
+    participant Kernel as 内核
+
+    loop 每一轮事件循环
+        App->>Kernel: poll(fds[], nfds, timeout)<br/>传入完整 pollfd 数组
+        Kernel-->>Kernel: 遍历数组，检查每个 fd 的就绪状态
+        Kernel->>App: 返回就绪数量（写入 revents 字段）
+        App->>App: 线性扫描数组，找 revents != 0 的项
+        App->>App: 对就绪 fd 执行 read/write
+    end
+```
+
+`poll()` 相比 `select()` 的改进：无位图大小限制，fd 编号不连续时没有空洞扫描。但核心问题与 `select()` 相同：**每轮调用都要把完整数组在用户态与内核之间来回传递，并做线性扫描**。连接数为 N、活跃连接数为 k 时，每轮开销是 O(N) 而非 O(k)。
+
+```mermaid
+flowchart LR
+    subgraph pollfd_array[“pollfd 数组（N 项）”]
+        direction LR
+        fd0[“fd=3\nevents=POLLIN\nrevents=POLLIN ✓”]
+        fd1[“fd=4\nevents=POLLIN\nrevents=0”]
+        fd2[“fd=5\nevents=POLLIN\nrevents=0”]
+        fdn[“...\nfd=3+N-1\nrevents=0”]
+    end
+    App[“应用线程”] -->|”每轮传入整个数组”| pollfd_array
+    pollfd_array -->|”线性扫描 revents”| App
+    note[“活跃 fd: 1 个\n扫描代价: O(N)”]
+```
+
+#### 3.2.3 epoll
+
+`epoll` 是 Linux 特有接口，针对 `poll()` 的 O(N) 扫描问题提出了根本性解决。它在内核中维护两个核心数据结构：
+
+- **interest list（关注集合）**：用红黑树存储所有被关注的 fd，支持 O(log N) 的增删改（`epoll_ctl`）。
+- **ready list（就绪链表）**：当某个 fd 上发生就绪事件时，内核通过回调把该 fd 加入此链表，`epoll_wait()` 只需返回链表中的项。
+
+```mermaid
+flowchart TB
+    subgraph kernel[“内核空间”]
+        direction TB
+        IL[“Interest List\n（红黑树）\nfd3, fd4, fd5, ..., fd1000”]
+        RL[“Ready List\n（链表）\nfd3”]
+        CB[“fd 就绪时\n内核回调”]
+        IL -->|”事件到达”| CB
+        CB --> RL
+    end
+
+    App[“应用线程”] -->|”epoll_ctl(ADD/MOD/DEL)”| IL
+    App -->|”epoll_wait()”| RL
+    RL -->|”返回就绪事件列表\n大小 = k（活跃数）”| App
+```
+
+**关键差异**：`epoll_wait()` 的返回开销是 O(k)（k 为当前就绪 fd 数），而不是 O(N)。当 N 很大、k 很小时（典型的长连接场景），epoll 的优势极为明显。
+
+```mermaid
+sequenceDiagram
+    participant App as 应用线程
+    participant epfd as epoll 实例（内核）
+    participant NIC as 网卡/内核协议栈
+
+    App->>epfd: epoll_create1(0) → epfd
+    App->>epfd: epoll_ctl(EPOLL_CTL_ADD, fd3, EPOLLIN)
+    App->>epfd: epoll_ctl(EPOLL_CTL_ADD, fd4, EPOLLIN)
+
+    loop 每一轮事件循环
+        App->>epfd: epoll_wait(epfd, events, maxevents, timeout)
+        NIC->>epfd: fd3 数据到达 → 加入 ready list
+        epfd->>App: 返回 [{fd3, EPOLLIN}]（只返回就绪项）
+        App->>App: 处理 fd3（read/write）
+    end
+
+    App->>epfd: epoll_ctl(EPOLL_CTL_DEL, fd3, NULL)
+```
+
+#### 3.2.4 LT 与 ET 触发模式对比
+
+`epoll` 有两种触发方式，决定了就绪事件何时被报告以及应用需要如何响应：
 
 | 模式 | 语义 | 编程要求 | 适用场景 |
 |---|---|---|---|
 | 水平触发 LT | 只要 fd 仍处于就绪状态，后续 `epoll_wait()` 仍可能返回该事件 | 编程较简单，可以逐步读取 | 默认模式，适合教学和普通服务器 |
 | 边缘触发 ET | 只在状态从未就绪变为就绪时通知 | fd 必须非阻塞；收到事件后通常要循环读/写直到 `EAGAIN` | 高性能场景，但更容易出现遗漏事件的 bug |
 
-在 Lab1 中，`poll()` 是最低要求，适合作为理解多路复用的基础；`epoll` 是加分项，也更接近真实 Linux 高并发服务器。
+下图用内核缓冲区的状态变化说明两种模式的通知时机差异：
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> 空: 缓冲区初始为空
+
+    空 --> 有数据: 数据到达（empty → non-empty）
+    note right of 有数据
+        LT: 每次 epoll_wait 都通知
+        ET: 仅此状态变化时通知一次
+    end note
+
+    有数据 --> 部分读取: 应用读取部分数据
+    note right of 部分读取
+        LT: 仍会继续通知
+        ET: 不再通知（需循环读到 EAGAIN）
+    end note
+
+    部分读取 --> 空: 读到 EAGAIN（缓冲区耗尽）
+    有数据 --> 空: 一次性读完
+```
+
+**ET 模式的典型陷阱**：若应用只读了一次就退出事件处理，缓冲区中仍有数据但 ET 不会再次通知，导致连接”挂住”。因此 ET 模式必须搭配非阻塞 fd，并在循环中读写直到 `EAGAIN`。
+
+#### 3.2.5 三种接口的核心差异总结
+
+```mermaid
+flowchart LR
+    subgraph select_flow[“select()”]
+        s1[“每轮重建 fd_set”] --> s2[“复制到内核 O(N)”]
+        s2 --> s3[“内核扫描所有位 O(N)”]
+        s3 --> s4[“用户扫描结果 O(N)”]
+    end
+
+    subgraph poll_flow[“poll()”]
+        p1[“pollfd 数组不变”] --> p2[“复制到内核 O(N)”]
+        p2 --> p3[“内核扫描数组 O(N)”]
+        p3 --> p4[“用户扫描 revents O(N)”]
+    end
+
+    subgraph epoll_flow[“epoll”]
+        e1[“epoll_ctl 维护 interest list\n均摊 O(log N)”] --> e2[“epoll_wait 仅传 events 数组”]
+        e2 --> e3[“内核直接返回 ready list O(k)”]
+        e3 --> e4[“用户处理就绪项 O(k)”]
+    end
+```
+
+在 Lab1 中，`poll()` 是最低要求，适合作为理解多路复用的基础；`epoll` 是加分项，也更接近真实 Linux 高并发服务器。建议先用 LT 模式实现 `epoll_server`，再视情况探索 ET 模式的性能差异。
 
 ### 3.3 异步 I/O：POSIX AIO 与 io_uring
 
