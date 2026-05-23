@@ -1,0 +1,16 @@
+server        work  sleep_us  conns  threads  runs  mean_thr_reqs  mean_avg_ms  sum_errors
+server_epoll  0     0         1000   8        3     75469          0.102        0
+server_epoll  0     0         2000   8        3     73806          0.104        0
+server_epoll  0     0         4000   8        3     67192          0.099        0
+server_epoll  0     0         8000   8        3     52451          0.066        11712
+server_epoll  0     0         16000  8        3     24788          0.042        11385
+server_poll   0     0         1000   8        3     32117          0.246        0
+server_poll   0     0         2000   8        3     31740          0.235        2931
+server_poll   0     0         4000   8        3     29055          0.244        8931
+server_poll   0     0         8000   8        3     22593          0.248        20931
+server_poll   0     0         16000  8        3     15001          0.237        44931
+server_pool   0     0         1000   8        3     121167         0.062        0
+server_pool   0     0         2000   8        3     111175         0.065        0
+server_pool   0     0         4000   8        3     71129          0.060        0
+server_pool   0     0         8000   8        3     37431          0.058        0
+server_pool   0     0         16000  8        3     15708          0.055        19989
