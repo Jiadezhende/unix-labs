@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <time.h>
@@ -92,4 +93,24 @@ int write_all(int fd, const void *buf, size_t n)
 void ignore_sigpipe(void)
 {
     signal(SIGPIPE, SIG_IGN);
+}
+
+/* volatile sink: 让忙计算结果"被使用", 防止 -O2 把整个循环优化掉。 */
+static volatile uint64_t g_busy_sink;
+
+void simulate_work(int cpu_units, int sleep_us)
+{
+    if (cpu_units > 0) {
+        /* 每单位约 1000 次数据依赖的整数运算; 用上一轮 sink 作为初值,
+         * 使循环无法被常量折叠。单位步长便于按机器算力调参。 */
+        uint64_t acc = g_busy_sink + 0x9e3779b97f4a7c15ULL;
+        for (int u = 0; u < cpu_units; u++) {
+            for (int i = 0; i < 1000; i++)
+                acc = acc * 6364136223846793005ULL + 1442695040888963407ULL
+                    + (uint64_t)i;
+        }
+        g_busy_sink = acc;
+    }
+    if (sleep_us > 0)
+        usleep((useconds_t)sleep_us);
 }

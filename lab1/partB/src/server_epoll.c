@@ -46,6 +46,8 @@ typedef struct {
 } conn_t;
 
 static int active_conns = 0;     /* 当前在线连接数 (单线程, 无需加锁) */
+static int g_work     = 0;       /* -w: 每请求 CPU 忙计算单位 */
+static int g_sleep_us = 0;       /* -u: 每请求阻塞 usleep 微秒 */
 
 /* 修改连接注册的 epoll 事件; 若与当前一致则跳过 epoll_ctl。
  * 成功返回 0, 失败返回 -1。 */
@@ -165,6 +167,11 @@ static int handle_readable(int epfd, conn_t *c)
         return -1;                       /* 读出错 */
     }
 
+    /* 模拟业务处理: 单线程 reactor 下慢任务会卡住整个事件循环, 此时
+     * 其它连接的就绪事件全部排队等待 —— 这正是 epoll 在"业务有成本"
+     * 场景下需要外接 worker pool 的根本原因。 */
+    simulate_work(g_work, g_sleep_us);
+
     /* 立即回写, 尽量直接发出 */
     size_t off = 0;
     while (off < (size_t)n) {
@@ -198,14 +205,21 @@ int main(int argc, char *argv[])
     int port = DEFAULT_PORT;
 
     int opt;
-    while ((opt = getopt(argc, argv, "p:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:w:u:h")) != -1) {
         switch (opt) {
         case 'p':
             port = atoi(optarg);
             break;
+        case 'w':
+            g_work = atoi(optarg);
+            break;
+        case 'u':
+            g_sleep_us = atoi(optarg);
+            break;
         case 'h':
         default:
-            fprintf(stderr, "用法: %s [-p 端口]\n", argv[0]);
+            fprintf(stderr,
+                "用法: %s [-p 端口] [-w 计算量] [-u 微秒]\n", argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
@@ -228,7 +242,8 @@ int main(int argc, char *argv[])
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &e) < 0)
         die("epoll_ctl ADD listen_fd");
 
-    log_msg("epoll 服务器启动 (水平触发 LT), 监听端口 %d", port);
+    log_msg("epoll 服务器启动 (水平触发 LT), 监听端口 %d "
+            "(work=%d, sleep_us=%d)", port, g_work, g_sleep_us);
 
     struct epoll_event evs[MAX_EVENTS];
 

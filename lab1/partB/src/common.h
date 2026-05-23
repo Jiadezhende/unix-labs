@@ -37,4 +37,12 @@ int write_all(int fd, const void *buf, size_t n);
  * 所有服务器与客户端在启动时都应调用本函数。 */
 void ignore_sigpipe(void);
 
+/* 模拟每个请求的"业务处理成本", 用于把对比从纯 echo 扩展到"存在处理
+ * 开销"的服务器场景。两类慢任务可叠加, 均为 0 时退化为纯 echo:
+ *   cpu_units > 0: 做 cpu_units 单位的忙计算 (占用 CPU, 不放弃执行流);
+ *   sleep_us  > 0: usleep(sleep_us) (阻塞式慢任务, 会卡住单线程 reactor)。
+ * 注意: 该函数对单线程事件循环 (poll/epoll) 与每连接一线程 (pool) 的
+ * 影响截然不同, 正是慢任务对照实验要观察的核心。 */
+void simulate_work(int cpu_units, int sleep_us);
+
 #endif /* COMMON_H */

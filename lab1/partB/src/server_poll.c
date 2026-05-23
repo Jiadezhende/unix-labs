@@ -28,17 +28,26 @@
 
 int main(int argc, char *argv[])
 {
-    int port = DEFAULT_PORT;
+    int port  = DEFAULT_PORT;
+    int work  = 0;     /* -w: 每请求 CPU 忙计算单位 */
+    int sleep_us = 0;  /* -u: 每请求阻塞 usleep 微秒 */
 
     int opt;
-    while ((opt = getopt(argc, argv, "p:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:w:u:h")) != -1) {
         switch (opt) {
         case 'p':
             port = atoi(optarg);
             break;
+        case 'w':
+            work = atoi(optarg);
+            break;
+        case 'u':
+            sleep_us = atoi(optarg);
+            break;
         case 'h':
         default:
-            fprintf(stderr, "用法: %s [-p 端口]\n", argv[0]);
+            fprintf(stderr,
+                "用法: %s [-p 端口] [-w 计算量] [-u 微秒]\n", argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
@@ -58,7 +67,8 @@ int main(int argc, char *argv[])
     pfds[0].events = POLLIN;
     int maxidx = 0;          /* 当前使用到的最大下标 */
 
-    log_msg("poll 服务器启动, 监听端口 %d", port);
+    log_msg("poll 服务器启动, 监听端口 %d (work=%d, sleep_us=%d)",
+            port, work, sleep_us);
 
     char buf[IO_BUFSIZE];
 
@@ -114,6 +124,9 @@ int main(int argc, char *argv[])
             ssize_t n = read(pfds[i].fd, buf, sizeof(buf));
             int closed = 0;
             if (n > 0) {
+                /* 模拟业务处理: 单线程下慢任务会阻塞整个事件循环, 期间
+                 * 其它就绪连接得不到处理 —— 慢任务对照实验的关键现象。 */
+                simulate_work(work, sleep_us);
                 if (write_all(pfds[i].fd, buf, (size_t)n) < 0)
                     closed = 1;          /* 写失败 */
             } else if (n == 0) {

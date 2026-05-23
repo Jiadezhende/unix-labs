@@ -12,6 +12,13 @@
 #   THREADS     客户端线程数          (默认 8)
 #   REQS        每组的总请求数        (默认 200000)
 #   CONNS_LIST  并发连接数列表        (默认 "100 500 1000 2000")
+#   WORK        每请求 CPU 忙计算单位 (默认 0, 即纯 echo)
+#   SLEEP_US    每请求阻塞 usleep 微秒(默认 0, 即纯 echo)
+#
+# 慢任务对照: 设 WORK>0 或 SLEEP_US>0 时, 服务器每个请求附加业务处理
+# 成本, 用于观察单线程事件循环 (poll/epoll) 与每连接一线程 (pool) 在
+# "存在处理开销" 场景下的可扩展性差异。建议分别跑 WORK=0/SLEEP_US=0
+# (基线) 与若干非零取值, 并各自保存 results.csv。
 #
 # 注意: 实验数据仅供 Part B 分析使用; 本环境为 WSL2 虚拟化,
 # 绝对性能不代表物理机, 重点在于横向对比与趋势。
@@ -25,6 +32,8 @@ MSGSIZE=${MSGSIZE:-64}
 THREADS=${THREADS:-8}
 REQS=${REQS:-200000}
 CONNS_LIST=${CONNS_LIST:-"100 500 1000 2000"}
+WORK=${WORK:-0}
+SLEEP_US=${SLEEP_US:-0}
 OUT=results.csv
 
 echo "[bench] fd 上限 (ulimit -n) = $(ulimit -n)"
@@ -36,7 +45,9 @@ if ! make >/dev/null; then
     exit 1
 fi
 
-echo "server,conns,threads,msgsize,requests,errors,elapsed_s,throughput_reqs,mbps,avg_ms,p50_ms,p95_ms,p99_ms" > "$OUT"
+echo "[bench] 业务成本: work=$WORK, sleep_us=$SLEEP_US (均为 0 即纯 echo)"
+
+echo "server,work,sleep_us,conns,threads,msgsize,requests,errors,elapsed_s,throughput_reqs,mbps,avg_ms,p50_ms,p95_ms,p99_ms" > "$OUT"
 
 # run_server <服务器可执行名>
 run_server() {
@@ -44,7 +55,7 @@ run_server() {
     echo
     echo "[bench] ===== $bin ====="
 
-    "./bin/$bin" -p "$PORT" >/dev/null 2>&1 &
+    "./bin/$bin" -p "$PORT" -w "$WORK" -u "$SLEEP_US" >/dev/null 2>&1 &
     local pid=$!
     sleep 1
 
@@ -60,7 +71,7 @@ run_server() {
                             -n "$REQS" -s "$MSGSIZE" 2>/dev/null \
                | grep '^CSV,')
         if [ -n "$line" ]; then
-            echo "$bin,${line#CSV,}" >> "$OUT"
+            echo "$bin,$WORK,$SLEEP_US,${line#CSV,}" >> "$OUT"
         else
             echo "[bench] 警告: 未取到 $bin (c=$c) 的结果"
         fi

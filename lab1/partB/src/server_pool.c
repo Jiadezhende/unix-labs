@@ -38,6 +38,8 @@
 #define WORKER_STACK_SIZE  (256 * 1024)    /* 每个 worker 线程栈大小 */
 
 static atomic_int active_conns;            /* 当前在线连接数 */
+static int g_work     = 0;                  /* -w: 每请求 CPU 忙计算单位 */
+static int g_sleep_us = 0;                  /* -u: 每请求阻塞 usleep 微秒 */
 
 /* worker 线程: 对单个连接做阻塞式 echo, 结束后 close 并退出。 */
 static void *worker_main(void *arg)
@@ -48,6 +50,10 @@ static void *worker_main(void *arg)
     for (;;) {
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n > 0) {
+            /* 模拟业务处理: 每连接独占线程, 慢任务只阻塞自己这条连接,
+             * 多条连接的处理可借多核并行 —— 与单线程事件循环形成对照。
+             * (g_work/g_sleep_us 在建线程前已确定, worker 只读, 无竞态) */
+            simulate_work(g_work, g_sleep_us);
             if (write_all(fd, buf, (size_t)n) < 0)
                 break;                      /* 写失败 */
         } else if (n == 0) {
@@ -70,7 +76,7 @@ int main(int argc, char *argv[])
     int max_conns = DEFAULT_MAX_CONNS;
 
     int opt;
-    while ((opt = getopt(argc, argv, "p:m:h")) != -1) {
+    while ((opt = getopt(argc, argv, "p:m:w:u:h")) != -1) {
         switch (opt) {
         case 'p':
             port = atoi(optarg);
@@ -78,10 +84,17 @@ int main(int argc, char *argv[])
         case 'm':
             max_conns = atoi(optarg);
             break;
+        case 'w':
+            g_work = atoi(optarg);
+            break;
+        case 'u':
+            g_sleep_us = atoi(optarg);
+            break;
         case 'h':
         default:
-            fprintf(stderr, "用法: %s [-p 端口] [-m 最大并发连接数]\n",
-                    argv[0]);
+            fprintf(stderr,
+                "用法: %s [-p 端口] [-m 最大并发连接数] [-w 计算量] [-u 微秒]\n",
+                argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
@@ -103,7 +116,8 @@ int main(int argc, char *argv[])
 
     atomic_store(&active_conns, 0);
     log_msg("多线程服务器启动 (thread-per-connection), "
-            "监听端口 %d, 连接上限 %d", port, max_conns);
+            "监听端口 %d, 连接上限 %d (work=%d, sleep_us=%d)",
+            port, max_conns, g_work, g_sleep_us);
 
     /* 主线程专职 accept, 为每个连接派生一个 worker 线程。
      * active_conns 只由主线程递增、由 worker 递减, 故计数无竞态。 */
