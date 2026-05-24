@@ -216,6 +216,14 @@ make clean                 # 清理可执行文件与测试产物
 `test, buffsize, real, user, sys, bytes, throughput_MBps`，可直接导入
 Excel / Python(matplotlib) 等工具绘制性能曲线。
 
+**绘图**：本报告 4.7 节的图由 `partA/plot.py` 读取 `results.csv` 生成，输出到
+`partA/fig/`：
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install matplotlib
+.venv/bin/python plot.py     # 生成 fig/fig1~fig4.png
+```
+
 > 本报告第 4 节数据为**热缓存**条件下采集（运行时未加 `-d`，亦未手动 `drop_caches`），
 > 即 512 MB 测试文件已驻留内核页缓存。因此读测试反映的是"页缓存→用户缓冲区"的拷贝
 > 与系统调用开销，而非物理磁盘读取速度，这恰好凸显了系统调用与缓冲机制本身的代价。
@@ -353,12 +361,32 @@ Excel / Python(matplotlib) 等工具绘制性能曲线。
 
 ### 4.7 性能曲线图
 
-> 建议用 `results.csv` 绘制以下图表后插入：
+> 下列图表由 `plot.py` 读取 `results.csv` 自动绘制（横轴均为 BUFFSIZE 的对数刻度）。
+> 重新生成方式见 3.6 节末尾的"绘图"说明。
 
-- 图 1：`read()` 吞吐量 / real 时间随 BUFFSIZE 变化曲线（横轴建议用对数刻度）；
-- 图 2：`read()` 的 user 与 sys 时间随 BUFFSIZE 变化的堆叠/对比图；
-- 图 3：`read()` vs `fread()` vs `my_fread()` 吞吐量对比曲线；
-- 图 4：`write()` 有无 `O_SYNC` 的吞吐量对比曲线。
+![图 1 read() 吞吐量与 real 时间随 BUFFSIZE 的变化](fig/fig1_read_throughput_time.png)
+
+**图 1**　`read()` 吞吐量（左轴，线性）与 real 时间（右轴，对数）随 BUFFSIZE 的变化。
+吞吐量在 64 KB 处达峰约 6.6 GB/s，16 MB 反而回落；real 时间在小缓冲区段随 BUFFSIZE
+翻倍而减半，呈典型的"系统调用次数主导"反比关系。
+
+![图 2 read() 的 user 与 sys CPU 时间堆叠对比](fig/fig2_read_user_sys.png)
+
+**图 2**　`read()` 的 user 与 sys CPU 时间（堆叠，纵轴对数）随 BUFFSIZE 的变化。
+小缓冲区段 user 与 sys 同步成倍下降；BUFFSIZE ≥ 16384 后 user 时间趋近于 0，
+耗时几乎全部来自 sys（系统调用 + 内核态拷贝）。
+
+![图 3 read() vs fread() vs my_fread() 吞吐量对比](fig/fig3_read_fread_myfread.png)
+
+**图 3**　`read()`、`fread()`、`my_fread()` 三者吞吐量对比。小粒度下 `my_fread`/`fread`
+凭用户态缓冲远超裸 `read()`；中等粒度（约 8 KB）三者趋同；大粒度下 `my_fread` 受固定
+8 KB 内部缓冲限制触顶约 4 GB/s，被能减少系统调用与拷贝的 `fread`/`read` 反超。
+
+![图 4 write() 有无 O_SYNC 的吞吐量对比](fig/fig4_write_osync.png)
+
+**图 4**　`write()` 有无 `O_SYNC` 的吞吐量对比（纵轴对数）。无 `O_SYNC` 写入页缓存即返回，
+吞吐高出 `O_SYNC` 约两至三个数量级；`O_SYNC` 段吞吐随 BUFFSIZE 近似线性上升，因耗时由
+"同步落盘次数 × 单次约 2.4 ms 延迟"决定（详见 5.4 节）。
 
 ---
 
